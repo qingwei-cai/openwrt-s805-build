@@ -1,0 +1,104 @@
+name: 编译晶晨S805的LEDE固件
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/lede-s805.yml'
+      - 'configs/s805_lede.config'  # LEDE专用配置文件
+  pull_request:
+  schedule:
+    - cron: '0 2 * * 6'  # 每周六凌晨2点自动编译
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 检查系统环境
+        run: |
+          echo "操作系统: $(lsb_release -d | cut -f2)"
+          echo "CPU核心: $(nproc)"
+          echo "内存容量: $(free -h | awk '/Mem/ {print $2}')"
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential subversion git-core libncurses5-dev \
+            zlib1g-dev gawk flex quilt libssl-dev xsltproc libxml-parser-perl \
+            mercurial bzr ecj cvs unzip lib32gcc-s1 libc6-i386 python3 \
+            python3-pip rsync curl wget
+
+      - name: 拉取LEDE源码
+        run: |
+          # 拉取LEDE官方仓库（可替换为你需要的分支或fork版本）
+          git clone https://github.com/coolsnowwolf/lede.git lede  # 以 Lean的LEDE分支为例
+          cd lede
+          # 可指定具体版本或分支
+          # git checkout openwrt-21.02
+
+      - name: 更新并安装Feeds
+        run: |
+          cd lede
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 应用自定义配置
+        run: |
+          cd lede
+          # 下载自定义配置文件（针对S805的LEDE配置）
+          wget https://raw.githubusercontent.com/你的用户名/你的仓库名/main/configs/s805_lede.config -O .config
+          # 自动补充配置依赖
+          make defconfig
+
+      - name: 缓存编译资源（加速构建）
+        uses: actions/cache@v3
+        with:
+          path: |
+            lede/dl
+            lede/feeds
+          key: ${{ runner.os }}-lede-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-lede-
+
+      - name: 预下载依赖包
+        run: |
+          cd lede
+          make download -j$(nproc)
+          # 清理空文件
+          find dl -size 0 -delete
+
+      - name: 开始编译固件
+        run: |
+          cd lede
+          # 多线程编译，失败时自动切换为单线程以便调试
+          make -j$(nproc) || make -j1 V=s
+
+      - name: 整理输出文件
+        run: |
+          mkdir -p output
+          # LEDE的晶晨S805固件通常在以下路径（根据实际结构调整）
+          cp lede/bin/targets/amlogic/meson8b/*.bin output/
+          cp lede/bin/targets/amlogic/meson8b/*.img output/
+          # 生成固件信息
+          echo "编译时间: $(date)" > output/INFO.txt
+          echo "LEDE源码: coolsnowwolf/lede" >> output/INFO.txt
+          echo "目标设备: Amlogic S805" >> output/INFO.txt
+          echo "Git Commit: $(cd lede && git rev-parse --short HEAD)" >> output/INFO.txt
+
+      - name: 上传固件作为Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: lede-s805-firmware
+          path: output/
+          retention-days: 30  # 保留30天
+
+      - name: 自动创建Release（定时编译时）
+        if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: softprops/action-gh-release@v1
+        with:
+          name: LEDE-S805自动编译-${{ github.run_number }}
+          files: output/*.bin
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
